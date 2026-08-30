@@ -178,6 +178,41 @@
   .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
   .signout-btn { background: none; border: none; color: rgba(var(--text-rgb),0.5); font-size: 12px; cursor: pointer; }
 
+  .quick-nav { display: flex; gap: 10px; margin-bottom: 20px; }
+  .quick-nav-btn {
+    flex: 1; padding: 11px 10px; border-radius: 14px; border: 1px solid var(--line);
+    background: rgba(var(--text-rgb),0.05); color: var(--text); font-family: var(--body);
+    font-size: 12.5px; font-weight: 600; cursor: pointer; transition: background .2s ease, transform .15s ease;
+  }
+  .quick-nav-btn:hover { background: rgba(var(--text-rgb),0.1); }
+  .quick-nav-btn:active { transform: scale(0.96); }
+
+  .poi-list { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+  .poi-card {
+    border-radius: 16px; padding: 14px 16px; border: 1px solid var(--line);
+    background: rgba(var(--text-rgb),0.03); display: flex; gap: 12px; align-items: flex-start;
+  }
+  .poi-icon { font-size: 22px; flex-shrink: 0; margin-top: 2px; }
+  .poi-info h3 { font-family: var(--display); font-size: 15px; margin: 0 0 3px; }
+  .poi-info p { font-size: 12px; margin: 0 0 4px; color: rgba(var(--text-rgb),0.7); line-height: 1.4; }
+  .poi-distance { font-size: 11px; font-weight: 700; color: var(--savannah); }
+
+  .location-state { text-align: center; padding: 30px 10px; font-size: 13.5px; color: rgba(var(--text-rgb),0.7); }
+  .location-state button { margin-top: 14px; }
+
+  .star-row { display: flex; gap: 8px; margin: 16px 0 20px; justify-content: center; }
+  .star-btn { font-size: 30px; background: none; border: none; cursor: pointer; opacity: 0.35; transition: opacity .15s, transform .15s; }
+  .star-btn.active { opacity: 1; transform: scale(1.1); }
+  .feedback-textarea {
+    width: 100%; min-height: 90px; padding: 12px 14px; border-radius: 12px; margin-bottom: 14px;
+    border: 1px solid var(--line); background: rgba(var(--text-rgb),0.05); color: var(--text);
+    font-family: var(--body); font-size: 13.5px; resize: vertical;
+  }
+  .feedback-textarea::placeholder { color: rgba(var(--text-rgb),0.4); }
+  .feedback-textarea:focus { outline: none; border-color: var(--savannah); }
+  .feedback-success { text-align: center; padding: 40px 10px; }
+  .feedback-success .big-check { font-size: 46px; margin-bottom: 12px; }
+
   .back-btn {
     background: none; border: none; color: var(--text); font-family: var(--body);
     font-size: 13px; padding: 0; margin-bottom: 14px; cursor: pointer; opacity: 0.75;
@@ -480,12 +515,18 @@
         </div>
         <p class="eyebrow">Kinyarwanda · Culture · Wildlife</p>
         <p class="intro">Unlock real Rwandan destinations by learning the words that live there.</p>
+        <div class="quick-nav">
+          <button class="quick-nav-btn" id="nav-nearby">📍 Nearby</button>
+          <button class="quick-nav-btn" id="nav-feedback">💬 Tour feedback</button>
+        </div>
         <div class="dest-list stagger">${destCardsHtml}</div>
         <div class="badge-shelf">${badgeShelfHtml}</div>
-        <p class="nav-hint">Score 75%+ on a card to complete it — keep trying until you get it. Scoring is simulated in this build.</p>
+        <p class="nav-hint">Score 75%+ on a card to complete it — keep trying until you get it.</p>
       </div>`;
 
     document.getElementById('signout-btn').onclick = async () => { await supabase.auth.signOut(); };
+    document.getElementById('nav-nearby').onclick = renderNearby;
+    document.getElementById('nav-feedback').onclick = renderFeedback;
     content.querySelectorAll('.dest-card[data-dest-id]').forEach(el => { el.onclick = () => openLevel(el.dataset.destId); });
   }
 
@@ -506,7 +547,7 @@
             <div class="fact">${c.fact || ''}</div>
             <div class="action-row">
               <button class="listen-btn" data-word="${c.kinyarwanda_word}" title="Hear it">🔊</button>
-              <button class="mic-btn" data-card-id="${c.id}">🎤</button>
+              <button class="mic-btn" data-card-id="${c.id}" data-word="${c.kinyarwanda_word}">🎤</button>
             </div>
             <div class="score-wrap">
               <svg class="score-ring-svg" data-ring-for="${c.id}" viewBox="0 0 22 22">
@@ -539,7 +580,7 @@
     document.getElementById('back-btn').onclick = renderHome;
     content.querySelectorAll('.word-card').forEach(card => { card.onclick = () => card.classList.toggle('flipped'); });
     content.querySelectorAll('.mic-btn').forEach(btn => {
-      btn.onclick = (e) => { e.stopPropagation(); handleScoreAttempt(dest, btn.dataset.cardId); };
+      btn.onclick = (e) => { e.stopPropagation(); handleScoreAttempt(dest, btn.dataset.cardId, btn.dataset.word); };
     });
     content.querySelectorAll('.listen-btn').forEach(btn => {
       btn.onclick = (e) => { e.stopPropagation(); speakWord(btn.dataset.word, btn); };
@@ -572,26 +613,55 @@
   }
 
   const PASS_THRESHOLD = 75;
+  const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-  async function handleScoreAttempt(dest, cardId) {
+  // Plain Levenshtein edit distance, turned into a 0–1 similarity score.
+  function similarity(a, b) {
+    a = a.toLowerCase().trim(); b = b.toLowerCase().trim();
+    if (!a || !b) return 0;
+    const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+    for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        dp[i][j] = a[i - 1] === b[j - 1]
+          ? dp[i - 1][j - 1]
+          : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+    const dist = dp[a.length][b.length];
+    return 1 - dist / Math.max(a.length, b.length);
+  }
+
+  async function handleScoreAttempt(dest, cardId, targetWord) {
     const btn = content.querySelector(`.mic-btn[data-card-id="${cardId}"]`);
     const cardEl = content.querySelector(`.word-card[data-card-id="${cardId}"]`);
+    const retryEl = content.querySelector(`[data-retry-for="${cardId}"]`);
     if (cardEl.dataset.scored) return; // already passed — nothing more to do
+
+    if (!SpeechRecognitionCtor) {
+      retryEl.textContent = 'Speech recognition isn\'t supported in this browser — try Chrome on Android or desktop.';
+      return;
+    }
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.lang = 'rw-RW'; // most browsers will silently fall back to a default model
+    recognition.maxAlternatives = 3;
+    recognition.interimResults = false;
 
     btn.classList.add('listening');
     btn.textContent = '●';
+    retryEl.textContent = 'Listening…';
 
-    // Simulated score — replace with a real pronunciation-scoring call before shipping.
-    const score = Math.floor(55 + Math.random() * 45);
-
-    setTimeout(async () => {
+    let finished = false;
+    const finish = async (score, heardText) => {
+      if (finished) return;
+      finished = true;
       btn.classList.remove('listening');
       btn.textContent = '🎤';
       renderScore(cardId, score);
 
       await supabase.from('pronunciation_scores').insert({ user_id: session.user.id, card_id: cardId, score });
 
-      const retryEl = content.querySelector(`[data-retry-for="${cardId}"]`);
       if (score >= PASS_THRESHOLD) {
         retryEl.textContent = '';
         cardEl.dataset.scored = '1';
@@ -602,9 +672,39 @@
         front.appendChild(tick);
         await bumpProgress(dest);
       } else {
-        retryEl.textContent = 'Not quite — listen again and give it another try.';
+        retryEl.textContent = heardText
+          ? `Heard "${heardText}" — listen again and try once more.`
+          : 'Not quite — listen again and give it another try.';
       }
-    }, 1000);
+    };
+
+    recognition.onresult = (event) => {
+      const alternatives = Array.from(event.results[0]).map(r => r.transcript);
+      const bestMatch = alternatives.reduce((best, t) => {
+        const s = similarity(t, targetWord);
+        return s > best.score ? { text: t, score: s } : best;
+      }, { text: alternatives[0] || '', score: -1 });
+      const score = Math.round(bestMatch.score * 100);
+      finish(score, bestMatch.text);
+    };
+
+    recognition.onerror = (event) => {
+      btn.classList.remove('listening');
+      btn.textContent = '🎤';
+      retryEl.textContent = event.error === 'no-speech'
+        ? 'Didn\'t catch that — try speaking clearly into the mic.'
+        : event.error === 'not-allowed'
+        ? 'Microphone access is blocked — allow it in your browser settings and try again.'
+        : 'Mic error — try again.';
+      finished = true;
+    };
+
+    recognition.onend = () => {
+      btn.classList.remove('listening');
+      btn.textContent = '🎤';
+    };
+
+    recognition.start();
   }
 
   function renderScore(cardId, score) {
@@ -678,6 +778,143 @@
       setTimeout(() => p.remove(), 1700);
     }
   }
+
+  // ---------------------------------------------------------------
+  // Nearby: tourism sites, restaurants, lodges relative to the user
+  // ---------------------------------------------------------------
+  const POI_ICONS = { park: '🌲', restaurant: '🍽️', lodge: '🏨', activity: '🚵', other: '📍' };
+
+  function haversineKm(lat1, lon1, lat2, lon2) {
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  function renderNearby() {
+    content.innerHTML = `
+      <div class="screen active enter-right">
+        <button class="back-btn" id="back-btn">← Home</button>
+        <p class="eyebrow">NEARBY</p>
+        <h1 style="font-family:var(--display); font-size:20px; margin:0 0 4px;">Tourism sites &amp; restaurants</h1>
+        <p class="intro" style="margin-bottom:6px;">Found relative to your current location.</p>
+        <div id="nearby-body">
+          <div class="location-state">Requesting your location…</div>
+        </div>
+      </div>`;
+    document.getElementById('back-btn').onclick = renderHome;
+    loadNearby();
+  }
+
+  async function loadNearby() {
+    const body = document.getElementById('nearby-body');
+    if (!('geolocation' in navigator)) {
+      body.innerHTML = `<div class="location-state">This browser doesn't support location services.</div>`;
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude, longitude } = pos.coords;
+        const { data: pois, error } = await supabase.from('points_of_interest').select('*');
+        if (error || !pois) {
+          body.innerHTML = `<div class="location-state">Couldn't load places right now — try again shortly.</div>`;
+          return;
+        }
+        const withDistance = pois
+          .map(p => ({ ...p, distanceKm: haversineKm(latitude, longitude, p.latitude, p.longitude) }))
+          .sort((a, b) => a.distanceKm - b.distanceKm);
+
+        body.innerHTML = `<div class="poi-list">${withDistance.map(p => `
+          <div class="poi-card">
+            <div class="poi-icon">${POI_ICONS[p.category] || '📍'}</div>
+            <div class="poi-info">
+              <h3>${p.name}</h3>
+              <p>${p.description || ''}</p>
+              <div class="poi-distance">${p.distanceKm < 1 ? Math.round(p.distanceKm * 1000) + ' m' : p.distanceKm.toFixed(1) + ' km'} away</div>
+            </div>
+          </div>`).join('')}</div>`;
+      },
+      (err) => {
+        const msg = err.code === err.PERMISSION_DENIED
+          ? 'Location access was denied. Enable it in your browser settings to see nearby places.'
+          : 'Couldn\'t get your location — check your device\'s location settings and try again.';
+        body.innerHTML = `<div class="location-state">${msg}<br><button class="primary-btn" id="retry-location">Try again</button></div>`;
+        document.getElementById('retry-location').onclick = loadNearby;
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  }
+
+  // ---------------------------------------------------------------
+  // Tour feedback: feeds guide/tour planning for the company
+  // ---------------------------------------------------------------
+  function renderFeedback() {
+    const destOptionsHtml = destinations.map(d => `<option value="${d.title}"></option>`).join('');
+    content.innerHTML = `
+      <div class="screen active enter-right">
+        <button class="back-btn" id="back-btn">← Home</button>
+        <p class="eyebrow">TOUR FEEDBACK</p>
+        <h1 style="font-family:var(--display); font-size:20px; margin:0 0 4px;">How was your experience?</h1>
+        <p class="intro" style="margin-bottom:6px;">Your feedback goes straight to the tourism team for better tour and guide planning.</p>
+
+        <div class="star-row" id="star-row">
+          ${[1,2,3,4,5].map(n => `<button class="star-btn" data-star="${n}">★</button>`).join('')}
+        </div>
+
+        <input class="auth-field" id="fb-destination" list="fb-dest-list" placeholder="Which destination? (optional)" />
+        <datalist id="fb-dest-list">${destOptionsHtml}</datalist>
+        <input class="auth-field" id="fb-guide" placeholder="Guide's name (optional)" />
+        <textarea class="feedback-textarea" id="fb-comment" placeholder="What went well? What could be better?"></textarea>
+        <div class="auth-error" id="fb-error"></div>
+        <button class="primary-btn" id="fb-submit">Send feedback</button>
+      </div>`;
+
+    document.getElementById('back-btn').onclick = renderHome;
+
+    let selectedRating = 0;
+    const starButtons = content.querySelectorAll('.star-btn');
+    starButtons.forEach(btn => {
+      btn.onclick = () => {
+        selectedRating = Number(btn.dataset.star);
+        starButtons.forEach(b => b.classList.toggle('active', Number(b.dataset.star) <= selectedRating));
+      };
+    });
+
+    document.getElementById('fb-submit').onclick = async () => {
+      const errorEl = document.getElementById('fb-error');
+      errorEl.style.color = 'var(--clay)';
+      if (!selectedRating) { errorEl.textContent = 'Pick a star rating first.'; return; }
+
+      const destName = document.getElementById('fb-destination').value.trim();
+      const matchedDest = destinations.find(d => d.title.toLowerCase() === destName.toLowerCase());
+      const guideName = document.getElementById('fb-guide').value.trim() || null;
+      const comment = document.getElementById('fb-comment').value.trim() || null;
+
+      const { error } = await supabase.from('tour_feedback').insert({
+        user_id: session.user.id,
+        destination_id: matchedDest ? matchedDest.id : null,
+        guide_name: guideName,
+        rating: selectedRating,
+        comment
+      });
+
+      if (error) { errorEl.textContent = error.message; return; }
+
+      content.innerHTML = `
+        <div class="screen active">
+          <div class="feedback-success">
+            <div class="big-check">🙏</div>
+            <h2 style="font-family:var(--display); margin:0 0 8px;">Thank you!</h2>
+            <p class="intro">Your feedback has been sent to help plan better tours and guiding.</p>
+            <button class="primary-btn" id="fb-done">Back to Home</button>
+          </div>
+        </div>`;
+      document.getElementById('fb-done').onclick = renderHome;
+    };
+  }
 </script>
+
 </body>
 </html>
