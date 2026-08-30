@@ -60,10 +60,11 @@
     margin: 0 auto;
     min-height: 100vh;
     background: var(--bg);
+    color: var(--text);
     position: relative;
     overflow: hidden;
     isolation: isolate;
-    transition: background .3s ease;
+    transition: background .3s ease, color .3s ease;
   }
 
   .ambient { position: absolute; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
@@ -217,16 +218,28 @@
   .card-back .kiny-small { font-family: var(--display); font-weight: 700; font-size: 15px; margin: 4px 0 8px; }
   .card-back .fact { font-size: 11px; line-height: 1.4; color: #4a463f; margin-bottom: 8px; }
 
+  .action-row { display: flex; gap: 10px; margin-top: auto; align-items: center; }
+
   .mic-btn {
     width: 46px; height: 46px; border-radius: 50%; border: none;
     background: var(--clay); color: white; font-size: 18px;
     display: flex; align-items: center; justify-content: center;
-    cursor: pointer; margin-top: auto; position: relative;
+    cursor: pointer; position: relative;
     transition: transform .15s ease, background .2s ease;
   }
   .mic-btn:active { transform: scale(0.9); }
   .mic-btn.listening { animation: pulse 1s infinite; background: var(--forest); }
   @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(63,107,76,.55);} 70%{box-shadow:0 0 0 14px rgba(63,107,76,0);} 100%{box-shadow:0 0 0 0 rgba(63,107,76,0);} }
+
+  .listen-btn {
+    width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line);
+    background: rgba(var(--text-rgb),0.08); color: var(--ink); font-size: 15px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: transform .15s ease, background .2s ease;
+  }
+  .listen-btn:hover { background: rgba(var(--text-rgb),0.15); }
+  .listen-btn:active { transform: scale(0.9); }
+  .listen-btn.speaking { animation: pulse 1s infinite; }
 
   .score-wrap { display: flex; align-items: center; gap: 6px; margin-top: 6px; min-height: 16px; }
   .score-ring-svg { width: 22px; height: 22px; transform: rotate(-90deg); flex-shrink: 0; opacity: 0; transition: opacity .2s; }
@@ -234,6 +247,7 @@
   .score-ring-bg { fill: none; stroke: rgba(28,26,23,0.12); stroke-width: 3; }
   .score-ring-fg { fill: none; stroke: var(--forest); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 56.5; stroke-dashoffset: 56.5; transition: stroke-dashoffset 1s cubic-bezier(.2,.8,.2,1), stroke 1s; }
   .score-line { font-size: 10.5px; font-weight: 600; }
+  .retry-hint { font-size: 9.5px; color: rgba(var(--text-rgb),0.55); margin-top: 2px; }
 
   .overlay {
     position: absolute; inset: 0; background: rgba(23,21,18,0.9);
@@ -468,7 +482,7 @@
         <p class="intro">Unlock real Rwandan destinations by learning the words that live there.</p>
         <div class="dest-list stagger">${destCardsHtml}</div>
         <div class="badge-shelf">${badgeShelfHtml}</div>
-        <p class="nav-hint">Pronunciation scoring is simulated in this build — swap in a real speech model when ready.</p>
+        <p class="nav-hint">Score 75%+ on a card to complete it — keep trying until you get it. Scoring is simulated in this build.</p>
       </div>`;
 
     document.getElementById('signout-btn').onclick = async () => { await supabase.auth.signOut(); };
@@ -490,7 +504,10 @@
             <div class="eng">${c.english_word}</div>
             <div class="kiny-small">${c.kinyarwanda_word}</div>
             <div class="fact">${c.fact || ''}</div>
-            <button class="mic-btn" data-card-id="${c.id}">🎤</button>
+            <div class="action-row">
+              <button class="listen-btn" data-word="${c.kinyarwanda_word}" title="Hear it">🔊</button>
+              <button class="mic-btn" data-card-id="${c.id}">🎤</button>
+            </div>
             <div class="score-wrap">
               <svg class="score-ring-svg" data-ring-for="${c.id}" viewBox="0 0 22 22">
                 <circle class="score-ring-bg" cx="11" cy="11" r="9"/>
@@ -498,6 +515,7 @@
               </svg>
               <div class="score-line" data-score-for="${c.id}"></div>
             </div>
+            <div class="retry-hint" data-retry-for="${c.id}"></div>
           </div>
         </div>
       </div>`).join('');
@@ -523,15 +541,48 @@
     content.querySelectorAll('.mic-btn').forEach(btn => {
       btn.onclick = (e) => { e.stopPropagation(); handleScoreAttempt(dest, btn.dataset.cardId); };
     });
+    content.querySelectorAll('.listen-btn').forEach(btn => {
+      btn.onclick = (e) => { e.stopPropagation(); speakWord(btn.dataset.word, btn); };
+    });
   }
+
+  // Plays the target pronunciation via the browser's built-in speech synthesis.
+  // Kinyarwanda voices aren't available in most browsers, so this is a
+  // best-effort approximation (falls back toward French, Rwanda's other
+  // official language) — not a substitute for real native-speaker audio.
+  let cachedVoices = [];
+  if ('speechSynthesis' in window) {
+    speechSynthesis.onvoiceschanged = () => { cachedVoices = speechSynthesis.getVoices(); };
+    cachedVoices = speechSynthesis.getVoices();
+  }
+  function speakWord(word, btn) {
+    if (!('speechSynthesis' in window)) return;
+    speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(word);
+    const voices = cachedVoices.length ? cachedVoices : speechSynthesis.getVoices();
+    const voice = voices.find(v => v.lang?.toLowerCase().startsWith('rw'))
+      || voices.find(v => v.lang?.toLowerCase().startsWith('fr'));
+    if (voice) utter.voice = voice;
+    utter.rate = 0.85;
+    if (btn) {
+      btn.classList.add('speaking');
+      utter.onend = () => btn.classList.remove('speaking');
+    }
+    speechSynthesis.speak(utter);
+  }
+
+  const PASS_THRESHOLD = 75;
 
   async function handleScoreAttempt(dest, cardId) {
     const btn = content.querySelector(`.mic-btn[data-card-id="${cardId}"]`);
+    const cardEl = content.querySelector(`.word-card[data-card-id="${cardId}"]`);
+    if (cardEl.dataset.scored) return; // already passed — nothing more to do
+
     btn.classList.add('listening');
     btn.textContent = '●';
 
     // Simulated score — replace with a real pronunciation-scoring call before shipping.
-    const score = Math.floor(65 + Math.random() * 35);
+    const score = Math.floor(55 + Math.random() * 45);
 
     setTimeout(async () => {
       btn.classList.remove('listening');
@@ -540,8 +591,9 @@
 
       await supabase.from('pronunciation_scores').insert({ user_id: session.user.id, card_id: cardId, score });
 
-      const cardEl = content.querySelector(`.word-card[data-card-id="${cardId}"]`);
-      if (!cardEl.dataset.scored) {
+      const retryEl = content.querySelector(`[data-retry-for="${cardId}"]`);
+      if (score >= PASS_THRESHOLD) {
+        retryEl.textContent = '';
         cardEl.dataset.scored = '1';
         const front = cardEl.querySelector('.card-front');
         const tick = document.createElement('div');
@@ -549,6 +601,8 @@
         tick.textContent = '✓';
         front.appendChild(tick);
         await bumpProgress(dest);
+      } else {
+        retryEl.textContent = 'Not quite — listen again and give it another try.';
       }
     }, 1000);
   }
